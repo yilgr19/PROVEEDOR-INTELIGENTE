@@ -243,3 +243,122 @@ def search_by_reference(
 def count_all_prices(conn: sqlite3.Connection) -> int:
     row = conn.execute("SELECT COUNT(*) AS c FROM price_rows").fetchone()
     return int(row["c"]) if row else 0
+
+
+def get_price_row(conn: sqlite3.Connection, row_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT p.*, s.name AS supplier_name
+        FROM price_rows p
+        JOIN suppliers s ON s.id = p.supplier_id
+        WHERE p.id = ?
+        """,
+        (row_id,),
+    ).fetchone()
+
+
+def list_price_rows_admin(
+    conn: sqlite3.Connection,
+    supplier_id: int | None = None,
+    ref_substring: str = "",
+    limit: int = 500,
+) -> list[sqlite3.Row]:
+    """Listado para panel admin: filtro opcional por proveedor y texto en referencia."""
+    ref_substring = (ref_substring or "").strip()
+    q = """
+        SELECT p.id, p.supplier_id, s.name AS supplier_name, p.reference_raw,
+               p.description, p.cost, p.source_file, p.imported_at
+        FROM price_rows p
+        JOIN suppliers s ON s.id = p.supplier_id
+        WHERE 1=1
+    """
+    args: list[Any] = []
+    if supplier_id is not None:
+        q += " AND p.supplier_id = ?"
+        args.append(supplier_id)
+    if ref_substring:
+        like_raw = f"%{ref_substring}%"
+        like_norm = f"%{normalize_reference(ref_substring)}%"
+        q += " AND (p.reference_raw LIKE ? ESCAPE '\\' OR p.reference_norm LIKE ?)"
+        args.extend([like_raw, like_norm])
+    q += " ORDER BY s.name COLLATE NOCASE, p.reference_norm COLLATE NOCASE LIMIT ?"
+    args.append(limit)
+    return conn.execute(q, args).fetchall()
+
+
+def insert_price_row_manual(
+    conn: sqlite3.Connection,
+    supplier_id: int,
+    reference_raw: str,
+    description: str | None,
+    cost: float,
+    source_file: str | None = "manual",
+) -> int:
+    ref_norm = normalize_reference(reference_raw)
+    if not ref_norm:
+        raise ValueError("La referencia no puede estar vacía.")
+    cur = conn.execute(
+        """
+        INSERT INTO price_rows
+        (supplier_id, reference_raw, reference_norm, description, cost, source_file, imported_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            supplier_id,
+            reference_raw.strip(),
+            ref_norm,
+            (description or "").strip() or None,
+            float(cost),
+            source_file or "manual",
+            now_iso(),
+        ),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def update_price_row(
+    conn: sqlite3.Connection,
+    row_id: int,
+    reference_raw: str,
+    description: str | None,
+    cost: float,
+) -> None:
+    row = conn.execute(
+        "SELECT supplier_id FROM price_rows WHERE id = ?", (row_id,)
+    ).fetchone()
+    if not row:
+        raise ValueError("El registro no existe.")
+    supplier_id = int(row["supplier_id"])
+    ref_norm = normalize_reference(reference_raw)
+    if not ref_norm:
+        raise ValueError("La referencia no puede estar vacía.")
+    dup = conn.execute(
+        """
+        SELECT id FROM price_rows
+        WHERE supplier_id = ? AND reference_norm = ? AND id != ?
+        """,
+        (supplier_id, ref_norm, row_id),
+    ).fetchone()
+    if dup:
+        raise ValueError("Ya existe esa referencia para este proveedor.")
+    conn.execute(
+        """
+        UPDATE price_rows
+        SET reference_raw = ?, reference_norm = ?, description = ?, cost = ?
+        WHERE id = ?
+        """,
+        (
+            reference_raw.strip(),
+            ref_norm,
+            (description or "").strip() or None,
+            float(cost),
+            row_id,
+        ),
+    )
+    conn.commit()
+
+
+def delete_price_row(conn: sqlite3.Connection, row_id: int) -> None:
+    conn.execute("DELETE FROM price_rows WHERE id = ?", (row_id,))
+    conn.commit()

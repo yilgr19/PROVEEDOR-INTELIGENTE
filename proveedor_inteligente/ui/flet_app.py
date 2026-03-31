@@ -16,11 +16,15 @@ from proveedor_inteligente.data.database import (
     count_admins,
     count_all_prices,
     create_user,
+    delete_price_row,
     delete_user,
     get_connection,
+    get_price_row,
     get_user_by_id,
     get_user_by_username,
     init_db,
+    insert_price_row_manual,
+    list_price_rows_admin,
     list_suppliers,
     list_users,
     normalize_role,
@@ -28,6 +32,7 @@ from proveedor_inteligente.data.database import (
     search_by_reference,
     set_user_password,
     set_user_role,
+    update_price_row,
     upsert_supplier,
     user_count,
     user_is_admin,
@@ -104,9 +109,13 @@ def main(page: ft.Page) -> None:
     init_db(conn)
 
     try:
-        from proveedor_inteligente.bootstrap_users import USUARIOS_DESDE_CODIGO
+        from proveedor_inteligente import bootstrap_users as _bootstrap
     except ImportError:
-        USUARIOS_DESDE_CODIGO = []
+        _bootstrap = None
+    USUARIOS_DESDE_CODIGO = getattr(_bootstrap, "USUARIOS_DESDE_CODIGO", []) or []
+    _sync_bootstrap_passwords = bool(
+        getattr(_bootstrap, "SINCRONIZAR_CONTRASEÑAS_DESDE_BOOTSTRAP", False)
+    )
 
     for entry in USUARIOS_DESDE_CODIGO:
         if len(entry) == 2:
@@ -117,7 +126,10 @@ def main(page: ft.Page) -> None:
         u = uname.strip()
         if len(u) < 3 or len(plain) < 8:
             continue
-        if get_user_by_username(conn, u):
+        existing = get_user_by_username(conn, u)
+        if existing:
+            if _sync_bootstrap_passwords:
+                set_user_password(conn, int(existing["id"]), hash_password(plain))
             continue
         try:
             create_user(conn, u, hash_password(plain), role_boot)
@@ -131,6 +143,7 @@ def main(page: ft.Page) -> None:
         "last_lines": [],
         "last_ref": "",
         "last_sale": None,
+        "admin_tab": 0,
     }
 
     user_field = ft.TextField(label="Usuario", autofocus=True, width=320)
@@ -192,13 +205,23 @@ def main(page: ft.Page) -> None:
         data_row_min_height=40,
     )
 
-    explain = ft.Text(selectable=True, expand=True)
+    table_box = ft.Container(
+        height=340,
+        clip_behavior=ft.ClipBehavior.HARD_EDGE,
+        border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+        border_radius=4,
+        content=ft.Column(
+            controls=[table],
+            scroll=ft.ScrollMode.AUTO,
+            expand=True,
+        ),
+    )
+
+    explain = ft.Text(selectable=True)
 
     fp_import = ft.FilePicker()
     save_compare = ft.FilePicker()
     save_full = ft.FilePicker()
-
-    main_column = ft.Column(spacing=16, scroll=ft.ScrollMode.AUTO, expand=True)
 
     admin_users_list = ft.Column(
         spacing=8,
@@ -224,6 +247,30 @@ def main(page: ft.Page) -> None:
     admin_form_msg = ft.Text(color=ft.Colors.ERROR, size=12)
     pwd_field_a = ft.TextField(label="Nueva contraseña", password=True, width=300)
     pwd_field_b = ft.TextField(label="Confirmar contraseña", password=True, width=300)
+
+    ref_filter_supplier_dd = ft.Dropdown(
+        width=220,
+        label="Proveedor (filtro)",
+    )
+    ref_search_field = ft.TextField(
+        label="Buscar referencia",
+        hint_text="Fragmento de código o descripción",
+        width=220,
+    )
+    ref_list_column = ft.Column(
+        spacing=6,
+        scroll=ft.ScrollMode.AUTO,
+        height=300,
+    )
+    ref_crud_msg = ft.Text(color=ft.Colors.ERROR, size=12)
+    ref_new_supplier_dd = ft.Dropdown(width=200, label="Proveedor (alta)")
+    ref_new_reference = ft.TextField(label="Referencia", width=160)
+    ref_new_desc = ft.TextField(label="Descripción (opcional)", width=200)
+    ref_new_cost = ft.TextField(label="Costo", width=100)
+    quick_supplier_name = ft.TextField(
+        label="Nombre proveedor (vacío, sin Excel)",
+        width=220,
+    )
 
     def show_snack(msg: str) -> None:
         page.snack_bar = ft.SnackBar(ft.Text(msg))
@@ -394,12 +441,190 @@ def main(page: ft.Page) -> None:
         show_snack(f"Usuario «{un}» registrado.")
         refresh_admin_user_rows()
 
-    admin_section = ft.Column(
+    def refresh_ref_supplier_options() -> None:
+        sups = list_suppliers(conn)
+        ref_filter_supplier_dd.options = [
+            ft.DropdownOption(key="__all__", text="(Todos los proveedores)"),
+            *[ft.DropdownOption(key=str(s["id"]), text=str(s["name"])) for s in sups],
+        ]
+        ref_filter_supplier_dd.value = "__all__"
+        ref_new_supplier_dd.options = [
+            ft.DropdownOption(key=str(s["id"]), text=str(s["name"])) for s in sups
+        ]
+        if sups:
+            ref_new_supplier_dd.value = str(sups[0]["id"])
+        else:
+            ref_new_supplier_dd.value = None
+
+    def refresh_ref_list() -> None:
+        ref_crud_msg.value = ""
+        val = ref_filter_supplier_dd.value
+        sid = None if val in (None, "", "__all__") else int(val)
+        q = (ref_search_field.value or "").strip()
+        try:
+            rows = list_price_rows_admin(conn, sid, q)
+        except Exception as ex:
+            ref_crud_msg.value = str(ex)
+            rows = []
+        ref_list_column.controls.clear()
+        for r in rows:
+            rid = int(r["id"])
+            ref_list_column.controls.append(
+                ft.Row(
+                    [
+                        ft.Text(str(r["supplier_name"]), width=110),
+                        ft.Text(str(r["reference_raw"]), width=110),
+                        ft.Text(str(r["description"] or "")[:42], width=128),
+                        ft.Text(str(r["cost"]), width=56),
+                        ft.IconButton(
+                            icon=ft.Icons.EDIT_OUTLINED,
+                            tooltip="Editar",
+                            on_click=lambda e, i=rid: open_ref_edit_dialog(i),
+                        ),
+                        ft.IconButton(
+                            icon=ft.Icons.DELETE_OUTLINE,
+                            tooltip="Eliminar",
+                            icon_color=ft.Colors.ERROR,
+                            on_click=lambda e, i=rid: open_ref_delete_dialog(i),
+                        ),
+                    ],
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                )
+            )
+        page.update()
+
+    def open_ref_edit_dialog(row_id: int) -> None:
+        row = get_price_row(conn, row_id)
+        if not row:
+            show_snack("Registro no encontrado.")
+            return
+        ef_ref = ft.TextField(label="Referencia", value=str(row["reference_raw"]))
+        ef_desc = ft.TextField(label="Descripción", value=str(row["description"] or ""))
+        ef_cost = ft.TextField(label="Costo", value=str(row["cost"]))
+
+        def save_edit(_: ft.ControlEvent | None = None) -> None:
+            try:
+                c = float((ef_cost.value or "0").replace(",", "."))
+            except ValueError:
+                show_snack("Costo no válido.")
+                return
+            try:
+                update_price_row(conn, row_id, ef_ref.value or "", ef_desc.value, c)
+            except ValueError as e:
+                show_snack(str(e))
+                return
+            page.dialog = None
+            page.update()
+            show_snack("Referencia actualizada.")
+            refresh_ref_list()
+            refresh_stats()
+
+        page.dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text(f"Editar — {row['supplier_name']}"),
+            content=ft.Column([ef_ref, ef_desc, ef_cost], tight=True, width=420),
+            actions=[
+                ft.TextButton("Cancelar", on_click=close_dialog),
+                ft.TextButton("Guardar", on_click=save_edit),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        page.dialog.open = True
+        page.update()
+
+    def open_ref_delete_dialog(row_id: int) -> None:
+        row = get_price_row(conn, row_id)
+        if not row:
+            show_snack("Registro no encontrado.")
+            return
+        ref_lab = str(row["reference_raw"])
+        prov = str(row["supplier_name"])
+
+        def confirm_del(_: ft.ControlEvent | None = None) -> None:
+            delete_price_row(conn, row_id)
+            page.dialog = None
+            page.update()
+            show_snack(f"Eliminada «{ref_lab}» ({prov}).")
+            refresh_ref_list()
+            refresh_stats()
+
+        page.dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Eliminar referencia"),
+            content=ft.Text(
+                f"¿Eliminar la referencia «{ref_lab}» del proveedor «{prov}»?"
+            ),
+            actions=[
+                ft.TextButton("Cancelar", on_click=close_dialog),
+                ft.TextButton(
+                    "Eliminar",
+                    on_click=confirm_del,
+                    style=ft.ButtonStyle(color=ft.Colors.ERROR),
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        page.dialog.open = True
+        page.update()
+
+    def ref_add_click(_: ft.ControlEvent | None = None) -> None:
+        ref_crud_msg.value = ""
+        sid_val = ref_new_supplier_dd.value
+        if not sid_val:
+            ref_crud_msg.value = (
+                "No hay proveedores. Importe un Excel o cree datos antes de añadir referencias."
+            )
+            page.update()
+            return
+        ref_txt = (ref_new_reference.value or "").strip()
+        if not ref_txt:
+            ref_crud_msg.value = "Indique la referencia."
+            page.update()
+            return
+        try:
+            cost = float((ref_new_cost.value or "").replace(",", "."))
+        except ValueError:
+            ref_crud_msg.value = "Costo numérico no válido."
+            page.update()
+            return
+        try:
+            insert_price_row_manual(
+                conn, int(sid_val), ref_txt, ref_new_desc.value, cost
+            )
+        except ValueError as e:
+            ref_crud_msg.value = str(e)
+            page.update()
+            return
+        except sqlite3.IntegrityError:
+            ref_crud_msg.value = (
+                "Ya existe esa referencia para el proveedor seleccionado."
+            )
+            page.update()
+            return
+        ref_new_reference.value = ""
+        ref_new_desc.value = ""
+        ref_new_cost.value = ""
+        show_snack("Referencia creada.")
+        refresh_ref_list()
+        refresh_stats()
+
+    def quick_add_supplier(_: ft.ControlEvent | None = None) -> None:
+        n = (quick_supplier_name.value or "").strip()
+        if not n:
+            show_snack("Escriba el nombre del proveedor.")
+            return
+        upsert_supplier(conn, n)
+        quick_supplier_name.value = ""
+        show_snack(f"Proveedor «{n}» creado. Ya puede añadir referencias.")
+        refresh_ref_supplier_options()
+        refresh_ref_list()
+        refresh_stats()
+
+    users_panel = ft.Column(
         [
-            ft.Text("Administración de usuarios", style=ft.TextThemeStyle.TITLE_MEDIUM),
+            ft.Text("Usuarios", style=ft.TextThemeStyle.TITLE_SMALL),
             ft.Text(
-                "Solo los administradores ven este apartado: alta de usuarios, cambio de "
-                "contraseñas, cambio de rol y bajas.",
+                "Alta de usuarios, contraseña, rol y bajas.",
                 size=12,
                 color=ft.Colors.ON_SURFACE_VARIANT,
             ),
@@ -409,9 +634,7 @@ def main(page: ft.Page) -> None:
                     new_admin_username,
                     new_admin_password,
                     new_admin_role,
-                    ft.ElevatedButton(
-                        "Registrar usuario", on_click=admin_add_user
-                    ),
+                    ft.ElevatedButton("Registrar usuario", on_click=admin_add_user),
                 ],
                 wrap=True,
                 spacing=12,
@@ -421,7 +644,64 @@ def main(page: ft.Page) -> None:
             admin_users_list,
         ],
         spacing=12,
-        visible=False,
+        visible=True,
+    )
+
+    refs_panel = ft.Column(
+        [
+            ft.Text("Referencias y costos", style=ft.TextThemeStyle.TITLE_SMALL),
+            ft.Text(
+                "Consulte, cree, edite o elimine precios por referencia y proveedor. "
+                "Los cambios afectan las búsquedas de todos los usuarios.",
+                size=12,
+                color=ft.Colors.ON_SURFACE_VARIANT,
+            ),
+            ft.Row(
+                [
+                    quick_supplier_name,
+                    ft.OutlinedButton(
+                        "Crear proveedor vacío", on_click=quick_add_supplier
+                    ),
+                ],
+                spacing=12,
+                wrap=True,
+            ),
+            ft.Row(
+                [
+                    ref_filter_supplier_dd,
+                    ref_search_field,
+                    ft.ElevatedButton(
+                        "Consultar", icon=ft.Icons.SEARCH, on_click=refresh_ref_list
+                    ),
+                ],
+                wrap=True,
+                spacing=12,
+            ),
+            ft.Text(
+                "Proveedor | Referencia | Descripción | Costo",
+                size=11,
+                weight=ft.FontWeight.W_500,
+            ),
+            ref_list_column,
+            ft.Divider(),
+            ft.Text("Crear referencia", style=ft.TextThemeStyle.TITLE_SMALL),
+            ft.Row(
+                [
+                    ref_new_supplier_dd,
+                    ref_new_reference,
+                    ref_new_desc,
+                    ref_new_cost,
+                    ft.ElevatedButton(
+                        "Añadir", icon=ft.Icons.ADD, on_click=ref_add_click
+                    ),
+                ],
+                wrap=True,
+                spacing=12,
+            ),
+            ref_crud_msg,
+        ],
+        spacing=12,
+        visible=True,
     )
 
     def logout(_: ft.ControlEvent | None = None) -> None:
@@ -431,8 +711,7 @@ def main(page: ft.Page) -> None:
         state["last_lines"] = []
         page.appbar = None
         auth_overlay.visible = True
-        main_column.visible = False
-        admin_section.visible = False
+        workspace.visible = False
         pass_field.value = ""
         page.update()
 
@@ -443,7 +722,7 @@ def main(page: ft.Page) -> None:
 
     def go_main() -> None:
         auth_overlay.visible = False
-        main_column.visible = True
+        workspace.visible = True
         role_lbl = "Administrador" if state["is_admin"] else "Usuario"
         page.appbar = ft.AppBar(
             title=ft.Text(
@@ -460,7 +739,16 @@ def main(page: ft.Page) -> None:
                 )
             ],
         )
-        admin_section.visible = state["is_admin"]
+        nav_rail.visible = state["is_admin"]
+        rail_divider.visible = state["is_admin"]
+        export_row.visible = state["is_admin"]
+        role_hint.visible = not state["is_admin"]
+        state["admin_tab"] = 0
+        nav_rail.selected_index = 0
+        panel_home.visible = True
+        panel_import.visible = False
+        panel_users.visible = False
+        panel_refs.visible = False
         if state["is_admin"]:
             refresh_admin_user_rows()
         refresh_stats()
@@ -481,6 +769,13 @@ def main(page: ft.Page) -> None:
         go_main()
 
     async def pick_import(_: ft.ControlEvent | None = None) -> None:
+        if not state["is_admin"]:
+            page.snack_bar = ft.SnackBar(
+                ft.Text("Solo un administrador puede cargar o actualizar archivos Excel.")
+            )
+            page.snack_bar.open = True
+            page.update()
+            return
         files = await fp_import.pick_files(
             dialog_title="Seleccione los Excel de proveedores (uno por proveedor)",
             file_type=ft.FilePickerFileType.CUSTOM,
@@ -510,6 +805,9 @@ def main(page: ft.Page) -> None:
             parts.append("Errores: " + " | ".join(err))
         import_status.value = "\n".join(parts)
         refresh_stats()
+        if panel_refs.visible:
+            refresh_ref_supplier_options()
+            refresh_ref_list()
         page.update()
 
     def do_search(_: ft.ControlEvent | None = None) -> None:
@@ -555,6 +853,13 @@ def main(page: ft.Page) -> None:
     sale_input.on_submit = do_search
 
     async def export_cmp_click(_: ft.ControlEvent | None = None) -> None:
+        if not state["is_admin"]:
+            page.snack_bar = ft.SnackBar(
+                ft.Text("Solo un administrador puede exportar a Excel.")
+            )
+            page.snack_bar.open = True
+            page.update()
+            return
         if not state["last_lines"]:
             page.snack_bar = ft.SnackBar(ft.Text("Primero busque una referencia."))
             page.snack_bar.open = True
@@ -587,6 +892,13 @@ def main(page: ft.Page) -> None:
         page.update()
 
     async def export_full_click(_: ft.ControlEvent | None = None) -> None:
+        if not state["is_admin"]:
+            page.snack_bar = ft.SnackBar(
+                ft.Text("Solo un administrador puede exportar el catálogo completo.")
+            )
+            page.snack_bar.open = True
+            page.update()
+            return
         out = await save_full.save_file(
             dialog_title="Exportar catálogo completo",
             file_name="catalogo_proveedores.xlsx",
@@ -636,56 +948,156 @@ def main(page: ft.Page) -> None:
         bgcolor=ft.Colors.SURFACE,
     )
 
-    main_column.controls = [
-        ft.Text("Importación", style=ft.TextThemeStyle.TITLE_MEDIUM),
-        ft.Row(
-            [
-                ft.ElevatedButton(
-                    "Cargar / actualizar Excel (varios archivos)",
-                    icon=ft.Icons.UPLOAD_FILE,
-                    on_click=pick_import,
-                ),
-            ]
-        ),
-        ft.Text(
-            "Cada archivo actualiza un proveedor cuyo nombre es el del archivo (sin extensión). "
-            "Volver a cargar el mismo proveedor sustituye sus datos anteriores.",
-            size=12,
-            color=ft.Colors.ON_SURFACE_VARIANT,
-        ),
-        stats_text,
-        import_status,
-        ft.Divider(),
-        admin_section,
-        ft.Divider(),
-        ft.Text("Búsqueda por referencia", style=ft.TextThemeStyle.TITLE_MEDIUM),
-        ft.Row(
-            [
-                ref_input,
-                sale_input,
-                ft.ElevatedButton("Buscar", icon=ft.Icons.SEARCH, on_click=do_search),
-            ],
-            spacing=12,
-        ),
-        ft.Container(content=table, expand=True),
-        ft.Text("Recomendación y cálculos", style=ft.TextThemeStyle.TITLE_SMALL),
-        explain,
-        ft.Row(
-            [
-                ft.OutlinedButton("Exportar comparativa (Excel)", on_click=export_cmp_click),
-                ft.OutlinedButton("Exportar catálogo completo", on_click=export_full_click),
-            ],
-            spacing=12,
-        ),
-    ]
-    main_column.visible = False
+    role_hint = ft.Text(
+        "Rol «Usuario»: puede buscar por referencia, ver la comparativa de proveedores y el texto "
+        "de recomendación. La carga de Excel, la exportación y la gestión de cuentas están reservadas "
+        "para administradores.",
+        size=12,
+        color=ft.Colors.ON_SURFACE_VARIANT,
+        visible=False,
+    )
+
+    export_row = ft.Row(
+        [
+            ft.OutlinedButton("Exportar comparativa (Excel)", on_click=export_cmp_click),
+            ft.OutlinedButton("Exportar catálogo completo", on_click=export_full_click),
+        ],
+        spacing=12,
+        visible=False,
+    )
+
+    panel_import = ft.Column(
+        [
+            ft.Text("Importación de Excel", style=ft.TextThemeStyle.TITLE_MEDIUM),
+            ft.Row(
+                [
+                    ft.ElevatedButton(
+                        "Cargar / actualizar Excel (varios archivos)",
+                        icon=ft.Icons.UPLOAD_FILE,
+                        on_click=pick_import,
+                    ),
+                ]
+            ),
+            ft.Text(
+                "Cada archivo actualiza un proveedor cuyo nombre es el del archivo (sin extensión). "
+                "Volver a cargar el mismo proveedor sustituye sus datos anteriores.",
+                size=12,
+                color=ft.Colors.ON_SURFACE_VARIANT,
+            ),
+            import_status,
+        ],
+        spacing=12,
+        visible=False,
+    )
+
+    panel_home = ft.Column(
+        [
+            stats_text,
+            role_hint,
+            ft.Text("Búsqueda por referencia", style=ft.TextThemeStyle.TITLE_MEDIUM),
+            ft.Row(
+                [
+                    ref_input,
+                    sale_input,
+                    ft.ElevatedButton(
+                        "Buscar", icon=ft.Icons.SEARCH, on_click=do_search
+                    ),
+                ],
+                spacing=12,
+            ),
+            table_box,
+            ft.Text("Recomendación y cálculos", style=ft.TextThemeStyle.TITLE_SMALL),
+            explain,
+            export_row,
+        ],
+        spacing=16,
+        visible=True,
+    )
+
+    panel_users = ft.Column(
+        [users_panel],
+        spacing=0,
+        visible=False,
+    )
+
+    panel_refs = ft.Column(
+        [refs_panel],
+        spacing=0,
+        visible=False,
+    )
+
+    def admin_nav_change(e: ft.ControlEvent) -> None:
+        rail: ft.NavigationRail = e.control
+        idx = rail.selected_index if rail.selected_index is not None else 0
+        state["admin_tab"] = idx
+        panel_home.visible = idx == 0
+        panel_import.visible = idx == 1
+        panel_users.visible = idx == 2
+        panel_refs.visible = idx == 3
+        if idx == 2:
+            refresh_admin_user_rows()
+        if idx == 3:
+            refresh_ref_supplier_options()
+            refresh_ref_list()
+        page.update()
+
+    nav_rail = ft.NavigationRail(
+        selected_index=0,
+        label_type=ft.NavigationRailLabelType.NONE,
+        extended=True,
+        min_extended_width=200,
+        group_alignment=-1.0,
+        bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+        visible=False,
+        destinations=[
+            ft.NavigationRailDestination(
+                icon=ft.Icons.HOME_OUTLINED,
+                selected_icon=ft.Icons.HOME,
+                label="Inicio",
+            ),
+            ft.NavigationRailDestination(
+                icon=ft.Icons.UPLOAD_FILE_OUTLINED,
+                selected_icon=ft.Icons.UPLOAD_FILE,
+                label="Importar",
+            ),
+            ft.NavigationRailDestination(
+                icon=ft.Icons.PEOPLE_OUTLINE,
+                selected_icon=ft.Icons.PEOPLE,
+                label="Usuarios",
+            ),
+            ft.NavigationRailDestination(
+                icon=ft.Icons.INVENTORY_2_OUTLINED,
+                selected_icon=ft.Icons.INVENTORY_2,
+                label="Referencias",
+            ),
+        ],
+        on_change=admin_nav_change,
+    )
+
+    rail_divider = ft.VerticalDivider(width=1, visible=False)
+    body_scroll = ft.Column(
+        spacing=16,
+        scroll=ft.ScrollMode.AUTO,
+        expand=True,
+        controls=[panel_home, panel_import, panel_users, panel_refs],
+    )
+    workspace = ft.Row(
+        expand=True,
+        spacing=0,
+        controls=[
+            nav_rail,
+            rail_divider,
+            ft.Container(expand=True, padding=ft.padding.only(left=16), content=body_scroll),
+        ],
+        visible=False,
+    )
 
     page.services.extend([fp_import, save_compare, save_full])
     page.add(
         ft.Stack(
             expand=True,
             controls=[
-                main_column,
+                workspace,
                 auth_overlay,
             ],
         )
