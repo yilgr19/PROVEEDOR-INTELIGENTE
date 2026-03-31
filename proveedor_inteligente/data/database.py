@@ -1,12 +1,12 @@
 """SQLite local: inventario de costos por proveedor y referencia."""
 from __future__ import annotations
 
-import sqlite3
 import re
+import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
-from config import get_db_path
+from proveedor_inteligente.core.config import get_db_path
 
 ROLE_ADMIN = "admin"
 ROLE_USER = "user"

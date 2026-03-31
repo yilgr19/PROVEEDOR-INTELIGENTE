@@ -9,7 +9,7 @@ from typing import Any
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
 
-from database import normalize_reference
+from proveedor_inteligente.data.database import normalize_reference
 
 # Encabezados típicos (español / inglés), minúsculas para matching
 REF_KEYS = (
@@ -83,7 +83,6 @@ def detect_columns(headers: list[str]) -> tuple[int | None, int | None, int | No
         if scored_desc and scored_desc[0][0] >= 0.6 and scored_desc[0][1] not in (ref_i, cost_i)
         else None
     )
-    # Si hay dos columnas "precio", evitar usar la misma para ref y cost
     if ref_i is not None and cost_i is not None and ref_i == cost_i:
         for _, idx in scored_cost:
             if idx != ref_i:
