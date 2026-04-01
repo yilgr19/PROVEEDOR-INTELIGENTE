@@ -6,7 +6,12 @@ from typing import Any, Callable
 
 import flet as ft
 
-from proveedor_inteligente.data.database import list_suppliers, replace_supplier_prices, upsert_supplier
+from proveedor_inteligente.data.database import (
+    delete_supplier,
+    list_suppliers,
+    replace_supplier_prices,
+    upsert_supplier,
+)
 from proveedor_inteligente.services.excel_service import parse_supplier_excel
 
 
@@ -18,9 +23,8 @@ def create_import_tab(
     refresh_stats: Callable[[], None],
     on_import_maybe_refresh_refs: Callable[[], None],
 ) -> ft.Column:
-    
     import_status = ft.Text(size=13, selectable=True, text_align=ft.TextAlign.CENTER)
-    
+
     # CAMBIO: Usamos ResponsiveRow en lugar de Column para ver varias tarjetas por fila
     cards_grid = ft.ResponsiveRow(
         spacing=20,
@@ -85,24 +89,77 @@ def create_import_tab(
             page.update()
         return handler
 
-    def _supplier_card(name: str, on_import_click) -> ft.Container:
-        # Cada tarjeta ocupa 12 columnas en móvil, 6 en tablet y 4 en PC desktop
+    def _make_delete_supplier(supplier_id: int, supplier_name: str):
+        """Elimina en SQLite al clic (sin diálogo): IconButton+modal falla en Flet desktop con scroll."""
+
+        def on_delete(_: ft.ControlEvent | None = None) -> None:
+            if not state["is_admin"]:
+                page.snack_bar = ft.SnackBar(
+                    ft.Text("Solo un administrador puede eliminar proveedores.")
+                )
+                page.snack_bar.open = True
+                page.update()
+                return
+            delete_supplier(conn, supplier_id)
+            import_status.value = (
+                f"SQLite: proveedor «{supplier_name}» y todas sus referencias de precios eliminados."
+            )
+            page.snack_bar = ft.SnackBar(
+                ft.Text(f"Eliminado «{supplier_name}» y sus referencias.")
+            )
+            page.snack_bar.open = True
+            refresh_stats()
+            on_import_maybe_refresh_refs()
+            _rebuild_cards()
+            page.update()
+
+        return on_delete
+
+    def _supplier_card(name: str, on_import_click, on_delete_click) -> ft.Container:
         return ft.Container(
             col={"sm": 12, "md": 6, "lg": 4},
             content=ft.Card(
                 elevation=2,
                 content=ft.Container(
                     padding=20,
-                    content=ft.Column([
-                        ft.Row([
-                            ft.Icon(ft.Icons.STORE, color=ft.Colors.BLUE_700),
-                            ft.Text(name, size=16, weight="bold", overflow=ft.TextOverflow.ELLIPSIS, expand=True),
-                        ]),
-                        ft.Text("Sustituye precios con un nuevo Excel.", size=12, color=ft.Colors.GREY_600),
-                        ft.TextButton("Importar Excel", icon=ft.Icons.UPLOAD_FILE, on_click=on_import_click),
-                    ], spacing=10, tight=True)
-                )
-            )
+                    content=ft.Column(
+                        [
+                            ft.Row(
+                                [
+                                    ft.Icon(ft.Icons.STORE, color=ft.Colors.BLUE_700),
+                                    ft.Text(
+                                        name,
+                                        size=16,
+                                        weight=ft.FontWeight.W_600,
+                                        overflow=ft.TextOverflow.ELLIPSIS,
+                                        expand=True,
+                                    ),
+                                    ft.OutlinedButton(
+                                        "Eliminar",
+                                        icon=ft.Icons.DELETE_OUTLINE,
+                                        tooltip="Quitar proveedor y todas sus referencias en SQLite",
+                                        style=ft.ButtonStyle(color=ft.Colors.ERROR),
+                                        on_click=on_delete_click,
+                                    ),
+                                ],
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            ),
+                            ft.Text(
+                                "Sustituye precios con un nuevo Excel.",
+                                size=12,
+                                color=ft.Colors.GREY_600,
+                            ),
+                            ft.TextButton(
+                                "Importar Excel",
+                                icon=ft.Icons.UPLOAD_FILE,
+                                on_click=on_import_click,
+                            ),
+                        ],
+                        spacing=10,
+                        tight=True,
+                    ),
+                ),
+            ),
         )
 
     def _add_supplier_card(on_import_click) -> ft.Container:
@@ -127,9 +184,17 @@ def create_import_tab(
         try:
             rows = list_suppliers(conn)
             for s in rows:
+                sid = int(s["id"])
                 nm = str(s["name"])
-                cards_grid.controls.append(_supplier_card(nm, _make_pick_supplier(nm)))
-        except: pass
+                cards_grid.controls.append(
+                    _supplier_card(
+                        nm,
+                        _make_pick_supplier(nm),
+                        _make_delete_supplier(sid, nm),
+                    )
+                )
+        except Exception as ex:
+            import_status.value = f"No se pudo cargar proveedores: {ex}"
         cards_grid.controls.append(_add_supplier_card(_pick_new_suppliers))
 
     _rebuild_cards()

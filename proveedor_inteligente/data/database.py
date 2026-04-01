@@ -262,6 +262,13 @@ def upsert_supplier(conn: sqlite3.Connection, name: str) -> int:
     return int(cur.lastrowid)
 
 
+def delete_supplier(conn: sqlite3.Connection, supplier_id: int) -> None:
+    """Quita en SQLite todas las referencias/precios del proveedor y luego la fila del proveedor."""
+    conn.execute("DELETE FROM price_rows WHERE supplier_id = ?", (supplier_id,))
+    conn.execute("DELETE FROM suppliers WHERE id = ?", (supplier_id,))
+    conn.commit()
+
+
 def replace_supplier_prices(
     conn: sqlite3.Connection,
     supplier_id: int,
