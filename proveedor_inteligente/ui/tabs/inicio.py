@@ -15,7 +15,12 @@ from proveedor_inteligente.data.database import (
     top_suppliers_by_avg_cost,
 )
 from proveedor_inteligente.services.excel_service import export_comparison_excel, export_full_catalog
-from proveedor_inteligente.ui.tabs.common import build_explanation, parse_sale_optional
+from proveedor_inteligente.ui.tabs.common import (
+    build_explanation,
+    format_number_with_grouping,
+    parse_locale_number,
+    parse_sale_optional,
+)
 
 
 @dataclass(frozen=True)
@@ -66,10 +71,21 @@ def create_inicio_tab(
         hint_text="Letras, números y símbolos. No hace falta poner guiones si en el Excel van con guión.",
         expand=True,
     )
+    def _blur_sale(e: ft.ControlEvent) -> None:
+        c = e.control
+        t = (c.value or "").strip()
+        if not t:
+            return
+        try:
+            c.value = format_number_with_grouping(parse_locale_number(t))
+        except ValueError:
+            pass
+
     sale_input = ft.TextField(
         label="Precio de venta (opcional)",
-        hint_text="Opcional — solo para cálculo de ganancia",
+        hint_text="Opcional — miles con coma (p. ej. 12,500.99)",
         expand=True,
+        on_blur=_blur_sale,
     )
 
     table = ft.DataTable(
@@ -107,7 +123,9 @@ def create_inicio_tab(
     def refresh_stats() -> None:
         n = count_all_prices(conn)
         sups = list_suppliers(conn)
-        stats_text.value = f"Referencias en base: {n} — Proveedores: {len(sups)}"
+        stats_text.value = (
+            f"Referencias en base: {n:,} — Proveedores: {len(sups):,}"
+        )
 
         report_dynamic.controls.clear()
         if not state.get("is_admin"):
@@ -138,7 +156,7 @@ def create_inicio_tab(
                                         color=ft.Colors.BLUE_700,
                                     ),
                                     ft.Text(
-                                        f"Referencias con precio en catálogo: {n}",
+                                        f"Referencias con precio en catálogo: {n:,}",
                                         size=12,
                                         color=ft.Colors.BLUE_GREY_400,
                                     ),
@@ -188,6 +206,7 @@ def create_inicio_tab(
             name = str(row["supplier_name"])
             avg = float(row["avg_cost"] or 0)
             n_pr = int(row["n_prices"] or 0)
+            n_pr_fmt = f"{n_pr:,}"
             top_rows_col.controls.append(
                 ft.Container(
                     padding=ft.padding.symmetric(vertical=10, horizontal=12),
@@ -209,7 +228,9 @@ def create_inicio_tab(
                                 [
                                     ft.Text(name, weight=ft.FontWeight.W_600, size=14),
                                     ft.Text(
-                                        f"Coste medio: {avg:.4f} · {n_pr} referencias",
+                                        "Coste medio: "
+                                        f"{format_number_with_grouping(avg)} · "
+                                        f"{n_pr_fmt} referencias",
                                         size=12,
                                         color=ft.Colors.BLUE_GREY_400,
                                     ),
@@ -246,8 +267,8 @@ def create_inicio_tab(
             if sale is not None:
                 gain = sale - cost
                 margin = (gain / sale * 100.0) if sale else 0.0
-                g_txt = f"{gain:.4f}"
-                m_txt = f"{margin:.2f}"
+                g_txt = format_number_with_grouping(gain)
+                m_txt = format_number_with_grouping(margin, max_frac_digits=4)
             else:
                 g_txt = "—"
                 m_txt = "—"
@@ -258,12 +279,14 @@ def create_inicio_tab(
                         ft.DataCell(ft.Text(str(line["supplier_name"]))),
                         ft.DataCell(ft.Text(str(line["reference_raw"]))),
                         ft.DataCell(ft.Text(str(line.get("description") or ""))),
-                        ft.DataCell(ft.Text(str(cost))),
+                        ft.DataCell(ft.Text(format_number_with_grouping(cost))),
                         ft.DataCell(ft.Text(g_txt)),
                         ft.DataCell(ft.Text(m_txt)),
                     ]
                 )
             )
+        if sale is not None:
+            sale_input.value = format_number_with_grouping(sale)
         msg = build_explanation(lines, sale)
         if sale_bad:
             msg = (

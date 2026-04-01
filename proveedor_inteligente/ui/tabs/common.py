@@ -1,10 +1,72 @@
 """Textos de ayuda y utilidades compartidas entre pestañas."""
 from __future__ import annotations
 
+import math
 from datetime import datetime
 
 MIN_USERNAME_LEN = 3
 MIN_PASSWORD_LEN = 6
+
+
+def parse_locale_number(raw: str | None) -> float:
+    """Interpreta números con separador de miles (y coma o punto decimal)."""
+    s = (raw or "").strip().replace(" ", "").replace("\u00a0", "")
+    if not s:
+        raise ValueError("vacío")
+    negative = s.startswith("-")
+    if negative:
+        s = s[1:].strip()
+    if not s:
+        raise ValueError("vacío")
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "," in s:
+        head, tail = s.rsplit(",", 1)
+        if tail.isdigit() and len(tail) <= 2:
+            s = head.replace(".", "") + "." + tail
+        else:
+            s = s.replace(",", "")
+    elif "." in s:
+        parts = s.split(".")
+        if len(parts) == 2:
+            left, right = parts[0].replace(",", ""), parts[1]
+            if (
+                right.isdigit()
+                and len(right) == 3
+                and left.isdigit()
+                and left not in ("", "0")
+                and not (len(left) > 1 and left.startswith("0"))
+            ):
+                s = left + right
+            elif right.isdigit() and len(right) <= 2:
+                s = left + "." + right
+            elif right.isdigit():
+                s = left + "." + right
+            else:
+                s = "".join(parts)
+        else:
+            s = "".join(parts)
+    val = float(s)
+    return -val if negative else val
+
+
+def format_number_with_grouping(
+    value: object, *, max_frac_digits: int = 10
+) -> str:
+    """Comas como separador de miles y punto decimal (p. ej. 1,234.56)."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return str(value) if value is not None else ""
+    if math.isnan(f) or math.isinf(f):
+        return ""
+    txt = f"{f:,.{max_frac_digits}f}"
+    if "." in txt:
+        txt = txt.rstrip("0").rstrip(".")
+    return txt
 
 
 def fmt_created_at(raw: object) -> str:
@@ -33,26 +95,32 @@ def build_explanation(lines: list[dict], sale: float | None) -> str:
     blocks: list[str] = []
     blocks.append(
         f"El proveedor recomendado es «{best['supplier_name']}» porque tiene el menor costo "
-        f"para esta referencia: {best['cost']} (lista ordenada de menor a mayor costo)."
+        f"para esta referencia: {format_number_with_grouping(best['cost'])} "
+        "(lista ordenada de menor a mayor costo)."
     )
     if len(lines) > 1:
         blocks.append(
-            f"El costo más alto en la lista es {worst['cost']} («{worst['supplier_name']}»)."
+            "El costo más alto en la lista es "
+            f"{format_number_with_grouping(worst['cost'])} («{worst['supplier_name']}»)."
         )
     if sale is not None:
         blocks.append(
-            f"\nGanancia por unidad según precio de venta {sale} (venta − costo proveedor):"
+            "\nGanancia por unidad según precio de venta "
+            f"{format_number_with_grouping(sale)} (venta − costo proveedor):"
         )
         for line in lines:
             cost = float(line["cost"])
             gain = sale - cost
             pct = (gain / sale * 100.0) if sale else 0.0
             blocks.append(
-                f"  • {line['supplier_name']}: {gain:.4f} u. (margen sobre venta {pct:.2f}%)."
+                f"  • {line['supplier_name']}: "
+                f"{format_number_with_grouping(gain)} u. "
+                f"(margen sobre venta {format_number_with_grouping(pct, max_frac_digits=2)}%)."
             )
         bgain = sale - float(best["cost"])
         blocks.append(
-            f"\nCon el proveedor recomendado, cada unidad deja {bgain:.4f} frente a ese precio de venta."
+            "\nCon el proveedor recomendado, cada unidad deja "
+            f"{format_number_with_grouping(bgain)} frente a ese precio de venta."
         )
     else:
         blocks.append(
@@ -64,10 +132,10 @@ def build_explanation(lines: list[dict], sale: float | None) -> str:
 
 def parse_sale_optional(raw: str | None) -> tuple[float | None, bool]:
     """Devuelve (valor o None, True si había texto pero no es número válido)."""
-    s = (raw or "").strip().replace(",", ".")
+    s = (raw or "").strip()
     if not s:
         return None, False
     try:
-        return float(s), False
+        return parse_locale_number(s), False
     except ValueError:
         return None, True

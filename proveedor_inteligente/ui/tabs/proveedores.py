@@ -72,7 +72,7 @@ def create_proveedores_tab(
                                         weight=ft.FontWeight.W_600,
                                     ),
                                     ft.Text(
-                                        f"{n_prices} referencias · Última actualización: {upd}",
+                                        f"{n_prices:,} referencias · Última actualización: {upd}",
                                         size=12,
                                         color=ft.Colors.BLUE_GREY_400,
                                     ),
