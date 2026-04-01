@@ -90,8 +90,9 @@ def build_explanation(lines: list[dict], sale: float | None) -> str:
             "No hay coincidencias para esa referencia. "
             "Revise el código o importe los Excel de los proveedores."
         )
-    best = lines[0]
-    worst = lines[-1]
+    by_cost = sorted(lines, key=lambda r: float(r["cost"]))
+    best = by_cost[0]
+    worst = by_cost[-1]
     blocks: list[str] = []
     blocks.append(
         f"El proveedor recomendado es «{best['supplier_name']}» porque tiene el menor costo "
@@ -108,7 +109,7 @@ def build_explanation(lines: list[dict], sale: float | None) -> str:
             "\nGanancia por unidad según precio de venta "
             f"{format_number_with_grouping(sale)} (venta − costo proveedor):"
         )
-        for line in lines:
+        for line in by_cost:
             cost = float(line["cost"])
             gain = sale - cost
             pct = (gain / sale * 100.0) if sale else 0.0

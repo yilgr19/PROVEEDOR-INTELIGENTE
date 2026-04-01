@@ -45,6 +45,30 @@ def normalize_reference_compact(ref: str) -> str:
     return s
 
 
+def _like_escape(s: str) -> str:
+    """Escapa \\, % y _ para usar el patrón con LIKE ... ESCAPE '\\'."""
+    return (
+        str(s).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    )
+
+
+def normalize_phrase_fold(s: str) -> str:
+    """Texto en minúsculas y sin separadores habituales (búsqueda parcial en descripción)."""
+    if not s:
+        return ""
+    t = str(s).strip().lower()
+    t = re.sub(r"\s+", "", t)
+    t = _REF_COMPACT_STRIP.sub("", t)
+    return t
+
+
+# Expresión SQLite: descripción sin espacios/guiones/etc. habituales, en minúsculas.
+_DESC_FOLD_SQL = (
+    "lower(replace(replace(replace(replace(replace(replace(coalesce(p.description,''), "
+    "'-', ''), '_', ''), ' ', ''), '.', ''), '/', ''), ',', ''))"
+)
+
+
 def get_connection() -> sqlite3.Connection:
     path = get_db_path()
     conn = sqlite3.connect(str(path), check_same_thread=False)
@@ -374,27 +398,103 @@ def merge_supplier_prices(
 def search_by_reference(
     conn: sqlite3.Connection, reference: str
 ) -> list[dict[str, Any]]:
-    ref_norm = normalize_reference(reference)
-    ref_c = normalize_reference_compact(reference)
-    if not ref_norm and not ref_c:
+    """
+    - Con **un solo carácter**: búsqueda amplia (referencia o descripción, parcial e
+      insensible a mayúsculas/separadores). Orden: referencia A-Z, luego coste.
+    - Con **dos o más caracteres**: referencia que **empiece** por el texto (crudo,
+      normalizada o compacta) **o** descripción que **contenga** el texto (parcial,
+      sin distinguir mayúsculas / términos plegados). Mismo orden alfabético.
+    """
+    q = (reference or "").strip()
+    if not q:
         return []
+
+    ref_norm = normalize_reference(q)
+    ref_c = normalize_reference_compact(q)
     clauses: list[str] = []
     args: list[Any] = []
-    if ref_norm:
-        clauses.append("p.reference_norm = ?")
-        args.append(ref_norm)
-    if ref_c:
-        clauses.append("p.reference_compact = ?")
-        args.append(ref_c)
+
+    if len(q) <= 1:
+        pat_raw = f"%{_like_escape(q)}%"
+        pat_norm = f"%{_like_escape(ref_norm)}%" if ref_norm else None
+        pat_compact = f"%{_like_escape(ref_c)}%" if ref_c else None
+        fold = normalize_phrase_fold(q)
+        pat_fold = f"%{_like_escape(fold)}%" if fold else None
+
+        clauses.append("LOWER(p.reference_raw) LIKE LOWER(?) ESCAPE '\\'")
+        args.append(pat_raw)
+        if pat_norm is not None:
+            clauses.append("p.reference_norm LIKE ? ESCAPE '\\'")
+            args.append(pat_norm)
+        if pat_compact is not None:
+            clauses.append("p.reference_compact LIKE ? ESCAPE '\\'")
+            args.append(pat_compact)
+        clauses.append(
+            "(p.description IS NOT NULL AND LOWER(p.description) LIKE LOWER(?) ESCAPE '\\')"
+        )
+        args.append(pat_raw)
+        if pat_fold is not None:
+            clauses.append(
+                f"(p.description IS NOT NULL AND {_DESC_FOLD_SQL} LIKE ? ESCAPE '\\')"
+            )
+            args.append(pat_fold)
+    else:
+        clauses.append("LOWER(p.reference_raw) LIKE LOWER(?) ESCAPE '\\'")
+        args.append(f"{_like_escape(q)}%")
+        if ref_norm:
+            clauses.append("p.reference_norm LIKE ? ESCAPE '\\'")
+            args.append(f"{_like_escape(ref_norm)}%")
+        if ref_c:
+            clauses.append("p.reference_compact LIKE ? ESCAPE '\\'")
+            args.append(f"{_like_escape(ref_c)}%")
+        pat_raw_sub = f"%{_like_escape(q)}%"
+        fold = normalize_phrase_fold(q)
+        pat_fold = f"%{_like_escape(fold)}%" if fold else None
+        clauses.append(
+            "(p.description IS NOT NULL AND LOWER(p.description) LIKE LOWER(?) ESCAPE '\\')"
+        )
+        args.append(pat_raw_sub)
+        if pat_fold is not None:
+            clauses.append(
+                f"(p.description IS NOT NULL AND {_DESC_FOLD_SQL} LIKE ? ESCAPE '\\')"
+            )
+            args.append(pat_fold)
+
+    where_sql = " OR ".join(clauses)
+    order_sql = (
+        "ORDER BY p.reference_norm COLLATE NOCASE ASC, p.cost ASC, s.name COLLATE NOCASE"
+    )
     cur = conn.execute(
         f"""
-        SELECT s.name AS supplier_name, p.reference_raw, p.description, p.cost, p.source_file, p.imported_at
+        SELECT s.name AS supplier_name, p.reference_raw, p.description, p.cost,
+               p.source_file, p.imported_at, p.reference_norm
         FROM price_rows p
         JOIN suppliers s ON s.id = p.supplier_id
-        WHERE ({' OR '.join(clauses)})
-        ORDER BY p.cost ASC, s.name COLLATE NOCASE
+        WHERE ({where_sql})
+        {order_sql}
         """,
         args,
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def list_offers_by_reference_norm(
+    conn: sqlite3.Connection, reference_norm: str
+) -> list[dict[str, Any]]:
+    """Todas las filas de catálogo con esa referencia normalizada, de menor a mayor coste."""
+    rn = normalize_reference(reference_norm or "")
+    if not rn:
+        return []
+    cur = conn.execute(
+        """
+        SELECT s.name AS supplier_name, p.reference_raw, p.description, p.cost,
+               p.source_file, p.imported_at, p.reference_norm
+        FROM price_rows p
+        JOIN suppliers s ON s.id = p.supplier_id
+        WHERE p.reference_norm = ?
+        ORDER BY p.cost ASC, s.name COLLATE NOCASE
+        """,
+        (rn,),
     )
     return [dict(r) for r in cur.fetchall()]
 
