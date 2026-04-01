@@ -38,14 +38,8 @@ def create_usuarios_tab(
     close_dialog: Callable[[ft.ControlEvent | None], None],
 ) -> UsuariosTabBundle:
 
-    # Lista acotada con scroll propio (mismo enfoque que referencias.py): evita que el
-    # scroll de la pestaña absorba los clics en botones Material en Windows/Flet desktop.
-    admin_users_list = ft.Column(
-        spacing=8,
-        scroll=ft.ScrollMode.AUTO,
-        height=360,
-        tight=True,
-    )
+    # Sin scroll propio: el scroll único va en `users_panel`.
+    admin_users_list = ft.Column(spacing=8, tight=True)
     new_admin_username = ft.TextField(
         label="Nuevo usuario", width=200, bgcolor=ft.Colors.WHITE
     )
@@ -111,24 +105,25 @@ def create_usuarios_tab(
                 return
             page.dialog = None
             page.update()
-            show_snack(f"Contraseña actualizada para «{uname}».")
+            show_snack(f"Contraseña guardada en la base de datos para «{uname}».")
 
         page.dialog = ft.AlertDialog(
             modal=True,
-            title=ft.Text(f"Actualizar contraseña — {uname}"),
+            title=ft.Text(f"Modificar contraseña — {uname}"),
             content=ft.Column(
                 [pwd_a, pwd_b, pwd_err], tight=True, width=340
             ),
             actions=[
                 ft.TextButton("Cancelar", on_click=close_dialog),
-                ft.TextButton("Guardar", on_click=save_password),
+                ft.TextButton("Aplicar", on_click=save_password),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
         page.dialog.open = True
         page.update()
 
-    def open_delete_dialog(user_id: int) -> None:
+    def delete_user_now(user_id: int) -> None:
+        """Borra la fila en SQLite al instante (DELETE + commit), con las mismas reglas de seguridad."""
         if user_id == state.get("user_id"):
             show_snack("No puede eliminar su propia cuenta con la sesión activa.")
             return
@@ -140,38 +135,9 @@ def create_usuarios_tab(
             show_snack("No puede eliminar al único administrador del sistema.")
             return
         uname = str(tgt["username"])
-
-        def confirm_delete(_: ft.ControlEvent | None = None) -> None:
-            delete_user(conn, user_id)
-            page.dialog = None
-            page.update()
-            show_snack(f"Usuario «{uname}» eliminado.")
-            refresh_admin_user_rows()
-
-        page.dialog = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("Confirmar eliminación"),
-            content=ft.Text(
-                f"¿Eliminar la cuenta «{uname}»? Esta acción no se puede deshacer."
-            ),
-            actions=[
-                ft.TextButton("Cancelar", on_click=close_dialog),
-                ft.TextButton(
-                    "Eliminar",
-                    on_click=confirm_delete,
-                    style=ft.ButtonStyle(color=ft.Colors.ERROR),
-                ),
-            ],
-            actions_alignment=ft.MainAxisAlignment.END,
-        )
-        page.dialog.open = True
-        page.update()
-
-    def on_user_update_click(e: ft.ControlEvent) -> None:
-        open_password_dialog(int(e.control.data))
-
-    def on_user_delete_click(e: ft.ControlEvent) -> None:
-        open_delete_dialog(int(e.control.data))
+        delete_user(conn, user_id)
+        show_snack(f"Usuario «{uname}» eliminado de la base de datos.")
+        refresh_admin_user_rows()
 
     def refresh_admin_user_rows(*, update_page: bool = True) -> None:
         try:
@@ -199,25 +165,22 @@ def create_usuarios_tab(
                 alta_txt = fmt_created_at(u["created_at"])
             except (KeyError, TypeError):
                 alta_txt = "—"
-            sid = str(uid)
             admin_users_list.controls.append(
                 ft.Row(
                     [
                         ft.Text(str(u["username"]), width=150),
                         ft.Text(role_txt, width=120),
                         ft.Text(alta_txt, width=130, size=12),
-                        ft.TextButton(
-                            "Actualizar",
-                            tooltip="Cambiar contraseña de esta cuenta",
-                            data=sid,
-                            on_click=on_user_update_click,
+                        ft.OutlinedButton(
+                            "Modificar",
+                            tooltip="Modificar contraseña (guarda en SQLite)",
+                            on_click=lambda e, tid=uid: open_password_dialog(tid),
                         ),
                         ft.IconButton(
                             icon=ft.Icons.DELETE_OUTLINE,
                             icon_color=ft.Colors.ERROR,
-                            tooltip="Eliminar usuario",
-                            data=sid,
-                            on_click=on_user_delete_click,
+                            tooltip="Eliminar de la base de datos",
+                            on_click=lambda e, tid=uid: delete_user_now(tid),
                         ),
                     ],
                     spacing=4,
@@ -276,6 +239,8 @@ def create_usuarios_tab(
         ],
         tight=True,
         spacing=12,
+        scroll=ft.ScrollMode.AUTO,
+        expand=True,
     )
 
     return UsuariosTabBundle(panel=users_panel, refresh_rows=refresh_admin_user_rows)
