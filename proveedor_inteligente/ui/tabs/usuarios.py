@@ -16,6 +16,8 @@ from proveedor_inteligente.data.database import (
     list_users,
     normalize_role,
     set_user_password,
+    set_user_role,
+    update_user_username,
     user_is_admin,
 )
 from proveedor_inteligente.ui.tabs.common import MIN_PASSWORD_LEN, MIN_USERNAME_LEN, fmt_created_at
@@ -59,67 +61,46 @@ def create_usuarios_tab(
         ],
     )
     admin_form_msg = ft.Text(color=ft.Colors.ERROR, size=12)
+    # None = alta nueva; si hay id, el formulario actualiza ese usuario al pulsar el botón principal.
+    edit_user_id: list[int | None] = [None]
 
-    def open_password_dialog(user_id: int) -> None:
+    form_section_title = ft.Text("Registrar Nuevo", weight=ft.FontWeight.W_600)
+
+    def cancel_edit_form(_: ft.ControlEvent | None = None) -> None:
+        edit_user_id[0] = None
+        new_admin_username.value = ""
+        new_admin_password.value = ""
+        new_admin_role_seg.selected = [ROLE_USER]
+        new_admin_username.label = "Nuevo usuario"
+        new_admin_password.label = "Contraseña"
+        new_admin_password.hint_text = None
+        register_user_btn.content = "Registrar"
+        cancel_edit_btn.visible = False
+        form_section_title.value = "Registrar Nuevo"
+        admin_form_msg.value = ""
+        page.update()
+
+    def begin_edit_user(user_id: int) -> None:
         tgt = get_user_by_id(conn, user_id)
         if not tgt:
             show_snack("Usuario no encontrado.")
             return
-        uname = str(tgt["username"])
-        pwd_a = ft.TextField(
-            label="Nueva contraseña",
-            password=True,
-            can_reveal_password=True,
-            width=320,
-            autofocus=True,
+        edit_user_id[0] = user_id
+        new_admin_username.value = str(tgt["username"])
+        new_admin_password.value = ""
+        role = normalize_role(str(tgt["role"] or ""))
+        new_admin_role_seg.selected = [
+            ROLE_ADMIN if role == ROLE_ADMIN else ROLE_USER
+        ]
+        new_admin_username.label = "Usuario"
+        new_admin_password.label = "Contraseña"
+        new_admin_password.hint_text = (
+            "No se puede mostrar la clave guardada; escriba una nueva"
         )
-        pwd_b = ft.TextField(
-            label="Confirmar contraseña",
-            password=True,
-            can_reveal_password=True,
-            width=320,
-        )
-        pwd_err = ft.Text(color=ft.Colors.ERROR, size=12, visible=False)
-
-        def save_password(_: ft.ControlEvent | None = None) -> None:
-            pwd_err.visible = False
-            pwd_err.value = ""
-            a = pwd_a.value or ""
-            b = pwd_b.value or ""
-            if len(a) < MIN_PASSWORD_LEN:
-                pwd_err.value = f"Mínimo {MIN_PASSWORD_LEN} caracteres."
-                pwd_err.visible = True
-                page.update()
-                return
-            if a != b:
-                pwd_err.value = "Las contraseñas no coinciden."
-                pwd_err.visible = True
-                page.update()
-                return
-            try:
-                set_user_password(conn, user_id, hash_password(a))
-            except Exception as ex:
-                pwd_err.value = str(ex)
-                pwd_err.visible = True
-                page.update()
-                return
-            page.dialog = None
-            page.update()
-            show_snack(f"Contraseña guardada en la base de datos para «{uname}».")
-
-        page.dialog = ft.AlertDialog(
-            modal=True,
-            title=ft.Text(f"Modificar contraseña — {uname}"),
-            content=ft.Column(
-                [pwd_a, pwd_b, pwd_err], tight=True, width=340
-            ),
-            actions=[
-                ft.TextButton("Cancelar", on_click=close_dialog),
-                ft.TextButton("Aplicar", on_click=save_password),
-            ],
-            actions_alignment=ft.MainAxisAlignment.END,
-        )
-        page.dialog.open = True
+        form_section_title.value = "Editar usuario"
+        register_user_btn.content = "Guardar cambios"
+        cancel_edit_btn.visible = True
+        admin_form_msg.value = ""
         page.update()
 
     def delete_user_now(user_id: int) -> None:
@@ -173,8 +154,8 @@ def create_usuarios_tab(
                         ft.Text(alta_txt, width=130, size=12),
                         ft.OutlinedButton(
                             "Modificar",
-                            tooltip="Modificar contraseña (guarda en SQLite)",
-                            on_click=lambda e, tid=uid: open_password_dialog(tid),
+                            tooltip="Cargar en el formulario inferior para editar",
+                            on_click=lambda e, tid=uid: begin_edit_user(tid),
                         ),
                         ft.IconButton(
                             icon=ft.Icons.DELETE_OUTLINE,
@@ -204,6 +185,47 @@ def create_usuarios_tab(
             admin_form_msg.value = f"Contraseña: mínimo {MIN_PASSWORD_LEN} caracteres."
             page.update()
             return
+
+        eid = edit_user_id[0]
+        if eid is not None:
+            tgt = get_user_by_id(conn, eid)
+            if not tgt:
+                show_snack("Usuario no encontrado.")
+                cancel_edit_form()
+                return
+            old_un = str(tgt["username"]).strip().lower()
+            old_role = normalize_role(str(tgt["role"] or ""))
+            try:
+                if un != old_un:
+                    update_user_username(conn, eid, un)
+                set_user_password(conn, eid, hash_password(pw))
+                if role != old_role:
+                    if user_is_admin(tgt) and role != ROLE_ADMIN and count_admins(conn) <= 1:
+                        admin_form_msg.value = (
+                            "No puede quitar el rol de administrador al único admin."
+                        )
+                        page.update()
+                        return
+                    set_user_role(conn, eid, role)
+            except ValueError as err:
+                admin_form_msg.value = str(err)
+                page.update()
+                return
+            except Exception as ex:
+                admin_form_msg.value = str(ex)
+                page.update()
+                return
+            if state.get("user_id") == eid:
+                state["username"] = un
+                state["is_admin"] = role == ROLE_ADMIN
+            msg = f"Cambios guardados en la base de datos para «{un}»."
+            if state.get("user_id") == eid and un != old_un:
+                msg += " Puede cerrar sesión para actualizar el nombre en la barra superior."
+            show_snack(msg)
+            cancel_edit_form()
+            refresh_admin_user_rows()
+            return
+
         if get_user_by_username(conn, un):
             admin_form_msg.value = "Ese nombre de usuario ya existe."
             page.update()
@@ -221,6 +243,7 @@ def create_usuarios_tab(
         refresh_admin_user_rows()
 
     register_user_btn = ft.ElevatedButton("Registrar", on_click=admin_add_user)
+    cancel_edit_btn = ft.TextButton("Cancelar edición", visible=False, on_click=cancel_edit_form)
 
     users_panel = ft.Column(
         [
@@ -228,13 +251,13 @@ def create_usuarios_tab(
             bootstrap_users_hint,
             admin_users_list,
             ft.Divider(),
-            ft.Text("Registrar Nuevo", weight=ft.FontWeight.W_600),
+            form_section_title,
             ft.Row(
                 [new_admin_username, new_admin_password, new_admin_role_seg],
                 wrap=True,
                 spacing=12,
             ),
-            register_user_btn,
+            ft.Row([register_user_btn, cancel_edit_btn], spacing=12),
             admin_form_msg,
         ],
         tight=True,
