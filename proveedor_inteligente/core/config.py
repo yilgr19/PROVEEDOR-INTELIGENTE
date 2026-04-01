@@ -31,3 +31,9 @@ def get_flet_cache_dir() -> Path:
     d = PROJECT_ROOT / ".flet_cache" / "client"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def get_app_icon_path() -> Path | None:
+    """Icono de ventana (Windows: .ico en la raíz del repo, carpeta assets/)."""
+    p = PROJECT_ROOT / "assets" / "app_icon.ico"
+    return p if p.is_file() else None

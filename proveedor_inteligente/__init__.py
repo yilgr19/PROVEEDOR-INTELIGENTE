@@ -7,5 +7,5 @@ Proveedor Inteligente — estructura del código:
 - ui/          Interfaz Flet (ventana, login, panel admin, consultas).
 - bootstrap_users.py  Usuarios iniciales (edítelo usted; no exponer en público).
 
-Ejecutar: python run.py   (o python main.py en la raíz del proyecto)
+Ejecutar: python run.py
 """

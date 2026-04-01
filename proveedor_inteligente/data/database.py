@@ -131,10 +131,13 @@ def list_users(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
 
 def count_admins(conn: sqlite3.Connection) -> int:
-    row = conn.execute(
-        "SELECT COUNT(*) AS c FROM users WHERE role = ?", (ROLE_ADMIN,)
-    ).fetchone()
-    return int(row["c"]) if row else 0
+    """Cuenta administradores usando normalize_role (p. ej. 'admin' o 'administrador' en BD)."""
+    rows = conn.execute("SELECT role FROM users").fetchall()
+    return sum(
+        1
+        for row in rows
+        if normalize_role(str(row["role"] or "")) == ROLE_ADMIN
+    )
 
 
 def set_user_password(
@@ -152,6 +155,19 @@ def set_user_role(conn: sqlite3.Connection, user_id: int, role: str) -> None:
         "UPDATE users SET role = ? WHERE id = ?",
         (normalize_role(role), user_id),
     )
+    conn.commit()
+
+
+def update_user_username(
+    conn: sqlite3.Connection, user_id: int, new_username: str
+) -> None:
+    nu = new_username.strip().lower()
+    if len(nu) < 3:
+        raise ValueError("El usuario debe tener al menos 3 caracteres.")
+    row_other = get_user_by_username(conn, nu)
+    if row_other is not None and int(row_other["id"]) != user_id:
+        raise ValueError("Ese nombre de usuario ya está en uso.")
+    conn.execute("UPDATE users SET username = ? WHERE id = ?", (nu, user_id))
     conn.commit()
 
 
