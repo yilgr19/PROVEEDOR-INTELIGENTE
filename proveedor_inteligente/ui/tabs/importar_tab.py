@@ -9,7 +9,7 @@ import flet as ft
 from proveedor_inteligente.data.database import (
     delete_supplier,
     list_suppliers,
-    replace_supplier_prices,
+    merge_supplier_prices,
     upsert_supplier,
 )
 from proveedor_inteligente.services.excel_service import parse_supplier_excel
@@ -38,8 +38,13 @@ def create_import_tab(
             if not name:
                 return False, f"{path.name}: nombre de proveedor vacío"
             sid = upsert_supplier(conn, name)
-            n = replace_supplier_prices(conn, sid, rows, path.name)
-            return True, f"{name} — {n} referencias importadas."
+            n_ins, n_upd, n_same, n_rem = merge_supplier_prices(
+                conn, sid, rows, path.name
+            )
+            return True, (
+                f"{name} — altas: {n_ins}, actualizadas: {n_upd}, "
+                f"sin cambios: {n_same}, quitadas (ya no en Excel): {n_rem}."
+            )
         except Exception as ex:
             return False, f"{path.name}: {ex}"
 

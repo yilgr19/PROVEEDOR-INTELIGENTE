@@ -269,16 +269,30 @@ def delete_supplier(conn: sqlite3.Connection, supplier_id: int) -> None:
     conn.commit()
 
 
-def replace_supplier_prices(
+def _float_equal(a: float, b: float) -> bool:
+    return abs(float(a) - float(b)) < 1e-9
+
+
+def merge_supplier_prices(
     conn: sqlite3.Connection,
     supplier_id: int,
     rows: list[tuple[str, str, str | None, float, str | None]],
     source_file: str | None,
-) -> int:
-    """rows: (reference_raw, reference_norm, description, cost, optional)."""
-    conn.execute("DELETE FROM price_rows WHERE supplier_id = ?", (supplier_id,))
+) -> tuple[int, int, int, int]:
+    """
+    rows: (reference_raw, reference_norm, description, cost, optional).
+
+    - Referencia ya existente (mismo supplier + reference_norm): solo ejecuta UPDATE si
+      cambian coste, descripción, texto crudo o reference_compact.
+    - Referencia nueva: INSERT.
+    - Filas en BD para ese proveedor cuya reference_norm no viene en el Excel: DELETE
+      (el archivo es la foto actual del catálogo).
+
+    Devuelve (insertadas, actualizadas, sin_cambios, eliminadas_en_bd).
+    """
     ts = now_iso()
-    n = 0
+    norms_in_file: set[str] = set()
+    parsed: list[tuple[str, str, str | None, float, str]] = []
     for ref_raw, ref_norm, desc, cost, _ in rows:
         if not ref_norm:
             continue
@@ -286,19 +300,75 @@ def replace_supplier_prices(
             c = float(cost)
         except (TypeError, ValueError):
             continue
-        ref_compact = normalize_reference_compact(ref_raw) or normalize_reference_compact(ref_norm)
-        conn.execute(
+        rraw = (ref_raw or "").strip()
+        norms_in_file.add(ref_norm)
+        ref_compact = normalize_reference_compact(rraw) or normalize_reference_compact(ref_norm)
+        parsed.append((rraw, ref_norm, desc, c, ref_compact))
+
+    n_ins = n_upd = n_same = 0
+    for rraw, ref_norm, desc, c, ref_compact in parsed:
+        d = ((desc or "").strip() or None)
+        row = conn.execute(
             """
-            INSERT INTO price_rows
-            (supplier_id, reference_raw, reference_norm, reference_compact,
-             description, cost, source_file, imported_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            SELECT cost, description, reference_raw, reference_compact
+            FROM price_rows
+            WHERE supplier_id = ? AND reference_norm = ?
             """,
-            (supplier_id, ref_raw, ref_norm, ref_compact, desc, c, source_file, ts),
-        )
-        n += 1
+            (supplier_id, ref_norm),
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                """
+                INSERT INTO price_rows
+                (supplier_id, reference_raw, reference_norm, reference_compact,
+                 description, cost, source_file, imported_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (supplier_id, rraw, ref_norm, ref_compact, d, c, source_file, ts),
+            )
+            n_ins += 1
+        else:
+            old_c = float(row["cost"])
+            old_d = row["description"]
+            if old_d is not None:
+                old_d = str(old_d).strip() or None
+            old_r = (row["reference_raw"] or "").strip()
+            old_rc = str(row["reference_compact"] or "")
+            changed = (
+                not _float_equal(old_c, c)
+                or (old_d or "") != (d or "")
+                or old_r != rraw
+                or old_rc != (ref_compact or "")
+            )
+            if changed:
+                conn.execute(
+                    """
+                    UPDATE price_rows SET
+                        reference_raw = ?,
+                        reference_compact = ?,
+                        description = ?,
+                        cost = ?,
+                        source_file = ?,
+                        imported_at = ?
+                    WHERE supplier_id = ? AND reference_norm = ?
+                    """,
+                    (rraw, ref_compact, d, c, source_file, ts, supplier_id, ref_norm),
+                )
+                n_upd += 1
+            else:
+                n_same += 1
+
+    n_rem = 0
+    for pr in conn.execute(
+        "SELECT id, reference_norm FROM price_rows WHERE supplier_id = ?",
+        (supplier_id,),
+    ).fetchall():
+        if pr["reference_norm"] not in norms_in_file:
+            conn.execute("DELETE FROM price_rows WHERE id = ?", (int(pr["id"]),))
+            n_rem += 1
+
     conn.commit()
-    return n
+    return (n_ins, n_upd, n_same, n_rem)
 
 
 def search_by_reference(
