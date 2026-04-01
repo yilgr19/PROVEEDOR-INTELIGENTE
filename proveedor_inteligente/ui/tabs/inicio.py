@@ -7,7 +7,13 @@ from typing import Any, Callable
 
 import flet as ft
 
-from proveedor_inteligente.data.database import count_all_prices, list_suppliers, search_by_reference
+from proveedor_inteligente.data.database import (
+    count_all_prices,
+    count_suppliers,
+    list_suppliers,
+    search_by_reference,
+    top_suppliers_by_avg_cost,
+)
 from proveedor_inteligente.services.excel_service import export_comparison_excel, export_full_catalog
 from proveedor_inteligente.ui.tabs.common import build_explanation, parse_sale_optional
 
@@ -18,6 +24,7 @@ class InicioTabBundle:
     refresh_stats: Callable[[], None]
     export_row: ft.Row
     role_hint: ft.Text
+    admin_report: ft.Column
 
 
 def create_inicio_tab(
@@ -28,6 +35,22 @@ def create_inicio_tab(
     save_full: ft.FilePicker,
 ) -> InicioTabBundle:
     stats_text = ft.Text()
+    report_dynamic = ft.Column(spacing=12, tight=True)
+
+    admin_report = ft.Column(
+        [
+            ft.Text("Reporte general", style=ft.TextThemeStyle.TITLE_MEDIUM),
+            ft.Text(
+                "Resumen según datos importados desde Excel (costes en catálogo).",
+                size=12,
+                color=ft.Colors.BLUE_GREY_400,
+            ),
+            report_dynamic,
+        ],
+        spacing=8,
+        tight=True,
+        visible=False,
+    )
 
     role_hint = ft.Text(
         "Rol «Usuario»: puede buscar por referencia, ver la comparativa de proveedores y el texto "
@@ -40,7 +63,7 @@ def create_inicio_tab(
 
     ref_input = ft.TextField(
         label="Referencia del producto",
-        hint_text="Código para filtrar en todos los proveedores cargados",
+        hint_text="Letras, números y símbolos. No hace falta poner guiones si en el Excel van con guión.",
         expand=True,
     )
     sale_input = ft.TextField(
@@ -85,6 +108,130 @@ def create_inicio_tab(
         n = count_all_prices(conn)
         sups = list_suppliers(conn)
         stats_text.value = f"Referencias en base: {n} — Proveedores: {len(sups)}"
+
+        report_dynamic.controls.clear()
+        if not state.get("is_admin"):
+            return
+        nsup = count_suppliers(conn)
+        report_dynamic.controls.append(
+            ft.Card(
+                content=ft.Container(
+                    padding=20,
+                    content=ft.Row(
+                        [
+                            ft.Icon(
+                                ft.Icons.WAREHOUSE_OUTLINED,
+                                size=40,
+                                color=ft.Colors.BLUE_700,
+                            ),
+                            ft.Column(
+                                [
+                                    ft.Text(
+                                        "Proveedores cargados",
+                                        weight=ft.FontWeight.W_600,
+                                        size=14,
+                                    ),
+                                    ft.Text(
+                                        str(nsup),
+                                        size=32,
+                                        weight=ft.FontWeight.W_700,
+                                        color=ft.Colors.BLUE_700,
+                                    ),
+                                    ft.Text(
+                                        f"Referencias con precio en catálogo: {n}",
+                                        size=12,
+                                        color=ft.Colors.BLUE_GREY_400,
+                                    ),
+                                ],
+                                spacing=4,
+                                tight=True,
+                                expand=True,
+                            ),
+                        ],
+                        spacing=16,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                ),
+            )
+        )
+        top_title = ft.Text(
+            "Top 5 proveedores más económicos (menor coste medio por producto)",
+            weight=ft.FontWeight.W_600,
+            size=14,
+        )
+        try:
+            top = top_suppliers_by_avg_cost(conn, limit=5)
+        except Exception as ex:
+            report_dynamic.controls.extend(
+                [
+                    top_title,
+                    ft.Text(f"No se pudo calcular el ranking: {ex}", color=ft.Colors.ERROR),
+                ]
+            )
+            return
+
+        if not top:
+            report_dynamic.controls.extend(
+                [
+                    top_title,
+                    ft.Text(
+                        "Aún no hay costes importados. Use la pestaña Importar para cargar Excel.",
+                        size=13,
+                        color=ft.Colors.BLUE_GREY_400,
+                    ),
+                ]
+            )
+            return
+
+        top_rows_col = ft.Column(spacing=8, tight=True)
+        for i, row in enumerate(top, start=1):
+            name = str(row["supplier_name"])
+            avg = float(row["avg_cost"] or 0)
+            n_pr = int(row["n_prices"] or 0)
+            top_rows_col.controls.append(
+                ft.Container(
+                    padding=ft.padding.symmetric(vertical=10, horizontal=12),
+                    bgcolor=ft.Colors.BLUE_GREY_50,
+                    border_radius=8,
+                    border=ft.border.all(1, ft.Colors.BLUE_GREY_100),
+                    content=ft.Row(
+                        [
+                            ft.Container(
+                                width=28,
+                                alignment=ft.Alignment.CENTER,
+                                content=ft.Text(
+                                    str(i),
+                                    weight=ft.FontWeight.W_700,
+                                    color=ft.Colors.BLUE_700,
+                                ),
+                            ),
+                            ft.Column(
+                                [
+                                    ft.Text(name, weight=ft.FontWeight.W_600, size=14),
+                                    ft.Text(
+                                        f"Coste medio: {avg:.4f} · {n_pr} referencias",
+                                        size=12,
+                                        color=ft.Colors.BLUE_GREY_400,
+                                    ),
+                                ],
+                                spacing=2,
+                                tight=True,
+                                expand=True,
+                            ),
+                        ],
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                )
+            )
+        report_dynamic.controls.extend(
+            [
+                top_title,
+                ft.Card(
+                    elevation=0,
+                    content=ft.Container(padding=8, content=top_rows_col),
+                ),
+            ]
+        )
 
     def do_search(_: ft.ControlEvent | None = None) -> None:
         ref = (ref_input.value or "").strip()
@@ -207,6 +354,7 @@ def create_inicio_tab(
 
     panel = ft.Column(
         [
+            admin_report,
             stats_text,
             role_hint,
             ft.Text("Búsqueda por referencia", style=ft.TextThemeStyle.TITLE_MEDIUM),
@@ -235,4 +383,5 @@ def create_inicio_tab(
         refresh_stats=refresh_stats,
         export_row=export_row,
         role_hint=role_hint,
+        admin_report=admin_report,
     )

@@ -11,6 +11,9 @@ from proveedor_inteligente.core.config import get_db_path
 ROLE_ADMIN = "admin"
 ROLE_USER = "user"
 
+# Máximo de filas devueltas en el panel Referencias (todos los productos hasta este tope).
+ADMIN_PRICE_LIST_LIMIT = 15_000
+
 
 def normalize_role(value: str) -> str:
     r = (value or "").strip().lower()
@@ -22,6 +25,23 @@ def normalize_role(value: str) -> str:
 def normalize_reference(ref: str) -> str:
     s = (ref or "").strip().upper()
     s = re.sub(r"\s+", " ", s)
+    return s
+
+
+# Separadores frecuentes en Excel (guiones, puntos, etc.); al quitarlos, "ABC-12" y "ABC12" coinciden.
+_REF_COMPACT_STRIP = re.compile(r"[\s\-−_./\\|:·,;]+")
+
+
+def normalize_reference_compact(ref: str) -> str:
+    """
+    Clave tolerante para búsqueda: mayúsculas y sin separadores habituales.
+    Conserva letras, dígitos y símbolos que no sean esos separadores (p. ej. #, +, *).
+    """
+    if not ref:
+        return ""
+    s = str(ref).strip().upper()
+    s = re.sub(r"\s+", "", s)
+    s = _REF_COMPACT_STRIP.sub("", s)
     return s
 
 
@@ -68,6 +88,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     conn.commit()
     _migrate_users_role(conn)
+    _migrate_price_rows_reference_compact(conn)
 
 
 def _migrate_users_role(conn: sqlite3.Connection) -> None:
@@ -85,6 +106,28 @@ def _migrate_users_role(conn: sqlite3.Connection) -> None:
             "UPDATE users SET role = ? WHERE id = ?",
             (ROLE_ADMIN, first["id"]),
         )
+    conn.commit()
+
+
+def _migrate_price_rows_reference_compact(conn: sqlite3.Connection) -> None:
+    cur = conn.execute("PRAGMA table_info(price_rows)")
+    cols = [row[1] for row in cur.fetchall()]
+    if "reference_compact" in cols:
+        return
+    conn.execute("ALTER TABLE price_rows ADD COLUMN reference_compact TEXT")
+    conn.commit()
+    for row in conn.execute("SELECT id, reference_raw, reference_norm FROM price_rows"):
+        c = normalize_reference_compact(row["reference_raw"] or "") or normalize_reference_compact(
+            row["reference_norm"] or ""
+        )
+        conn.execute(
+            "UPDATE price_rows SET reference_compact = ? WHERE id = ?",
+            (c, row["id"]),
+        )
+    conn.commit()
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS ix_price_ref_compact ON price_rows(reference_compact)"
+    )
     conn.commit()
 
 
@@ -187,6 +230,18 @@ def list_suppliers(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def list_suppliers_with_stats(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Id, nombre, updated_at y número de filas de precios (referencias) por proveedor."""
+    return conn.execute(
+        """
+        SELECT s.id, s.name, s.updated_at,
+               (SELECT COUNT(*) FROM price_rows p WHERE p.supplier_id = s.id) AS price_count
+        FROM suppliers s
+        ORDER BY s.name COLLATE NOCASE
+        """
+    ).fetchall()
+
+
 def upsert_supplier(conn: sqlite3.Connection, name: str) -> int:
     name = name.strip()
     if not name:
@@ -224,13 +279,15 @@ def replace_supplier_prices(
             c = float(cost)
         except (TypeError, ValueError):
             continue
+        ref_compact = normalize_reference_compact(ref_raw) or normalize_reference_compact(ref_norm)
         conn.execute(
             """
             INSERT INTO price_rows
-            (supplier_id, reference_raw, reference_norm, description, cost, source_file, imported_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            (supplier_id, reference_raw, reference_norm, reference_compact,
+             description, cost, source_file, imported_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (supplier_id, ref_raw, ref_norm, desc, c, source_file, ts),
+            (supplier_id, ref_raw, ref_norm, ref_compact, desc, c, source_file, ts),
         )
         n += 1
     conn.commit()
@@ -241,17 +298,26 @@ def search_by_reference(
     conn: sqlite3.Connection, reference: str
 ) -> list[dict[str, Any]]:
     ref_norm = normalize_reference(reference)
-    if not ref_norm:
+    ref_c = normalize_reference_compact(reference)
+    if not ref_norm and not ref_c:
         return []
+    clauses: list[str] = []
+    args: list[Any] = []
+    if ref_norm:
+        clauses.append("p.reference_norm = ?")
+        args.append(ref_norm)
+    if ref_c:
+        clauses.append("p.reference_compact = ?")
+        args.append(ref_c)
     cur = conn.execute(
-        """
+        f"""
         SELECT s.name AS supplier_name, p.reference_raw, p.description, p.cost, p.source_file, p.imported_at
         FROM price_rows p
         JOIN suppliers s ON s.id = p.supplier_id
-        WHERE p.reference_norm = ?
+        WHERE ({' OR '.join(clauses)})
         ORDER BY p.cost ASC, s.name COLLATE NOCASE
         """,
-        (ref_norm,),
+        args,
     )
     return [dict(r) for r in cur.fetchall()]
 
@@ -259,6 +325,30 @@ def search_by_reference(
 def count_all_prices(conn: sqlite3.Connection) -> int:
     row = conn.execute("SELECT COUNT(*) AS c FROM price_rows").fetchone()
     return int(row["c"]) if row else 0
+
+
+def count_suppliers(conn: sqlite3.Connection) -> int:
+    row = conn.execute("SELECT COUNT(*) AS c FROM suppliers").fetchone()
+    return int(row["c"]) if row else 0
+
+
+def top_suppliers_by_avg_cost(
+    conn: sqlite3.Connection, *, limit: int = 5
+) -> list[sqlite3.Row]:
+    """Proveedores con menor coste medio sobre sus productos (datos cargados por Excel)."""
+    return conn.execute(
+        """
+        SELECT s.name AS supplier_name,
+               AVG(p.cost) AS avg_cost,
+               COUNT(p.id) AS n_prices
+        FROM suppliers s
+        INNER JOIN price_rows p ON p.supplier_id = s.id
+        GROUP BY s.id, s.name
+        ORDER BY AVG(p.cost) ASC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
 
 
 def get_price_row(conn: sqlite3.Connection, row_id: int) -> sqlite3.Row | None:
@@ -277,9 +367,9 @@ def list_price_rows_admin(
     conn: sqlite3.Connection,
     supplier_id: int | None = None,
     ref_substring: str = "",
-    limit: int = 500,
+    limit: int = ADMIN_PRICE_LIST_LIMIT,
 ) -> list[sqlite3.Row]:
-    """Listado para panel admin: filtro opcional por proveedor y texto en referencia."""
+    """Listado para panel admin: filtro opcional por proveedor y texto en referencia/descripción."""
     ref_substring = (ref_substring or "").strip()
     q = """
         SELECT p.id, p.supplier_id, s.name AS supplier_name, p.reference_raw,
@@ -295,8 +385,18 @@ def list_price_rows_admin(
     if ref_substring:
         like_raw = f"%{ref_substring}%"
         like_norm = f"%{normalize_reference(ref_substring)}%"
-        q += " AND (p.reference_raw LIKE ? ESCAPE '\\' OR p.reference_norm LIKE ?)"
-        args.extend([like_raw, like_norm])
+        sub_compact = normalize_reference_compact(ref_substring)
+        or_parts = [
+            "p.reference_raw LIKE ? ESCAPE '\\'",
+            "p.reference_norm LIKE ? ESCAPE '\\'",
+            "(p.description IS NOT NULL AND p.description LIKE ? ESCAPE '\\')",
+        ]
+        like_args: list[str] = [like_raw, like_norm, like_raw]
+        if sub_compact:
+            or_parts.append("p.reference_compact LIKE ? ESCAPE '\\'")
+            like_args.append(f"%{sub_compact}%")
+        q += " AND (" + " OR ".join(or_parts) + ")"
+        args.extend(like_args)
     q += " ORDER BY s.name COLLATE NOCASE, p.reference_norm COLLATE NOCASE LIMIT ?"
     args.append(limit)
     return conn.execute(q, args).fetchall()
@@ -313,16 +413,19 @@ def insert_price_row_manual(
     ref_norm = normalize_reference(reference_raw)
     if not ref_norm:
         raise ValueError("La referencia no puede estar vacía.")
+    ref_compact = normalize_reference_compact(reference_raw) or normalize_reference_compact(ref_norm)
     cur = conn.execute(
         """
         INSERT INTO price_rows
-        (supplier_id, reference_raw, reference_norm, description, cost, source_file, imported_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        (supplier_id, reference_raw, reference_norm, reference_compact,
+         description, cost, source_file, imported_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             supplier_id,
             reference_raw.strip(),
             ref_norm,
+            ref_compact,
             (description or "").strip() or None,
             float(cost),
             source_file or "manual",
@@ -358,15 +461,17 @@ def update_price_row(
     ).fetchone()
     if dup:
         raise ValueError("Ya existe esa referencia para este proveedor.")
+    ref_compact = normalize_reference_compact(reference_raw) or normalize_reference_compact(ref_norm)
     conn.execute(
         """
         UPDATE price_rows
-        SET reference_raw = ?, reference_norm = ?, description = ?, cost = ?
+        SET reference_raw = ?, reference_norm = ?, reference_compact = ?, description = ?, cost = ?
         WHERE id = ?
         """,
         (
             reference_raw.strip(),
             ref_norm,
+            ref_compact,
             (description or "").strip() or None,
             float(cost),
             row_id,

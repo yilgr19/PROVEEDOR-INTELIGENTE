@@ -21,6 +21,7 @@ from proveedor_inteligente.data.database import (
 )
 from proveedor_inteligente.ui.tabs.importar_tab import create_import_tab
 from proveedor_inteligente.ui.tabs.inicio import create_inicio_tab
+from proveedor_inteligente.ui.tabs.proveedores import create_proveedores_tab
 from proveedor_inteligente.ui.tabs.referencias import create_referencias_tab
 from proveedor_inteligente.ui.tabs.usuarios import create_usuarios_tab
 
@@ -114,16 +115,33 @@ def main(page: ft.Page) -> None:
     inicio = create_inicio_tab(page, conn, state, save_compare, save_full)
     referencias = create_referencias_tab(page, conn, inicio.refresh_stats, show_snack, close_dialog)
     usuarios = create_usuarios_tab(page, conn, state, bootstrap_users_hint, show_snack, close_dialog)
-    
+    proveedores = create_proveedores_tab(page, conn)
+
+    def _tras_importar_excel() -> None:
+        proveedores.refresh_list()
+        if state["admin_tab"] == 4:
+            referencias.refresh_supplier_options()
+            referencias.refresh_list()
+
     panel_import = create_import_tab(
-        page, conn, state, fp_import, inicio.refresh_stats, 
-        lambda: (referencias.refresh_supplier_options(), referencias.refresh_list()) if state["admin_tab"] == 3 else None
+        page,
+        conn,
+        state,
+        fp_import,
+        inicio.refresh_stats,
+        _tras_importar_excel,
     )
 
-    _main_panels = (inicio.panel, panel_import, usuarios.panel, referencias.panel)
-    # Pestañas con scroll exterior: evita hijos expand+scroll anidados sin altura (p. ej. Importar).
-    # Usuarios (2): el panel ya lleva su propio scroll interno.
-    _tabs_con_scroll = {0, 1, 3}
+    _main_panels = (
+        inicio.panel,
+        panel_import,
+        proveedores.panel,
+        usuarios.panel,
+        referencias.panel,
+    )
+    # Scroll exterior solo donde el panel no trae scroll+expand propio (Importar, Inicio, Referencias).
+    # Proveedores (2) y Usuarios (3): scroll en el propio panel.
+    _tabs_con_scroll = {0, 1, 4}
 
     def _surface_para_pestaña(i: int) -> ft.Control:
         panel = _main_panels[i]
@@ -154,8 +172,12 @@ def main(page: ft.Page) -> None:
     def admin_nav_change(e: ft.ControlEvent) -> None:
         idx = e.control.selected_index
         apply_main_panel(idx)
-        if idx == 2: usuarios.refresh_rows(update_page=False)
-        if idx == 3: 
+        if idx == 2:
+            proveedores.refresh_list()
+            inicio.refresh_stats()
+        if idx == 3:
+            usuarios.refresh_rows(update_page=False)
+        if idx == 4:
             referencias.refresh_supplier_options()
             referencias.refresh_list()
         page.update()
@@ -169,6 +191,7 @@ def main(page: ft.Page) -> None:
         destinations=[
             ft.NavigationRailDestination(icon=ft.Icons.HOME_OUTLINED, selected_icon=ft.Icons.HOME, label="Inicio"),
             ft.NavigationRailDestination(icon=ft.Icons.UPLOAD_FILE_OUTLINED, selected_icon=ft.Icons.UPLOAD_FILE, label="Importar"),
+            ft.NavigationRailDestination(icon=ft.Icons.STORE_OUTLINED, selected_icon=ft.Icons.STORE, label="Proveedores"),
             ft.NavigationRailDestination(icon=ft.Icons.PEOPLE_OUTLINE, selected_icon=ft.Icons.PEOPLE, label="Usuarios"),
             ft.NavigationRailDestination(icon=ft.Icons.INVENTORY_2_OUTLINED, selected_icon=ft.Icons.INVENTORY_2, label="Referencias"),
         ],
@@ -211,6 +234,7 @@ def main(page: ft.Page) -> None:
         nav_rail.visible = state["is_admin"]
         rail_divider.visible = state["is_admin"]
         inicio.export_row.visible = state["is_admin"]
+        inicio.admin_report.visible = state["is_admin"]
         inicio.role_hint.visible = not state["is_admin"]
         apply_main_panel(0)
         inicio.refresh_stats()
