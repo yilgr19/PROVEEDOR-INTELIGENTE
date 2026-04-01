@@ -121,9 +121,9 @@ def main(page: ft.Page) -> None:
     )
 
     _main_panels = (inicio.panel, panel_import, usuarios.panel, referencias.panel)
-    # Pestaña Usuarios (2): el panel ya lleva su propio Column con scroll; no envolver
-    # en otro Column con scroll (rompe los clics en botones dentro de listas anidadas).
-    _tabs_con_scroll = {0, 3}
+    # Pestañas con scroll exterior: evita hijos expand+scroll anidados sin altura (p. ej. Importar).
+    # Usuarios (2): el panel ya lleva su propio scroll interno.
+    _tabs_con_scroll = {0, 1, 3}
 
     def _surface_para_pestaña(i: int) -> ft.Control:
         panel = _main_panels[i]
