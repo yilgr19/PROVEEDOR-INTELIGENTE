@@ -134,22 +134,23 @@ def create_import_tab(
 
     _rebuild_cards()
 
-    # Layout Final
+    # Mismo ritmo que la pestaña Usuarios: título size=20 W_600, subtítulo size=12;
+    # sin padding extra (el workspace ya aporta padding=24 en flet_app).
     return ft.Column(
         [
-            ft.Container(
-                padding=30,
-                content=ft.Column([
-                    ft.Text("Importar por proveedor", size=28, weight="bold"),
-                    ft.Text("Los precios se actualizan automáticamente al subir el archivo.", color=ft.Colors.GREY_700),
-                ], spacing=5)
+            ft.Text(
+                "Importar proveedores",
+                size=20,
+                weight=ft.FontWeight.W_600,
             ),
-            ft.Container(
-                padding=ft.padding.symmetric(horizontal=30),
-                content=cards_grid # Aquí está la cuadrícula responsiva
+            ft.Text(
+                "Los precios se actualizan automáticamente al subir el archivo.",
+                size=12,
+                color=ft.Colors.BLUE_GREY_400,
             ),
-            ft.Container(padding=20, content=import_status, alignment=ft.Alignment(0, 0)),
+            cards_grid,
+            ft.Container(padding=ft.padding.only(top=4), content=import_status),
         ],
-        spacing=10,
+        spacing=12,
         tight=True,
     )
